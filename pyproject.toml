@@ -1,0 +1,16 @@
+[project]
+name = "hcmus-ai-final-submission"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["numpy",
+                "pyomo",
+                "cvxpy",
+                "gekko",
+                "ortools",
+                "cpmpy",
+                "pycsp3",
+                "minizinc",
+                "pandas",
+                "scikit-learn",
+                "scipy",
+                "pandas"]
