@@ -21,6 +21,7 @@ IMPORTANT:
 """
 
 import sys
+from enum import Enum
 from pathlib import Path
 
 # Add src to path to import the interface
@@ -31,206 +32,436 @@ from agent_interface import PacmanAgent as BasePacmanAgent
 from agent_interface import GhostAgent as BaseGhostAgent
 from environment import Move
 import numpy as np
+import helper
+import random
+from collections import deque
+import time
 
+TIME_BUDGET = 0.8  # Time budget in seconds for each agent's step, to stay within this limit
 
 class PacmanAgent(BasePacmanAgent):
     """
     Pacman (Seeker) Agent - Goal: Catch the Ghost
-    
-    Implement your search algorithm to find and catch the ghost.
-    Suggested algorithms: BFS, DFS, A*, Greedy Best-First
     """
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
-        # TODO: Initialize any data structures you need
-        # Examples:
-        # - self.path = []  # Store planned path
-        # - self.visited = set()  # Track visited positions
+        self.max_depth = 4
         self.name = "Template Pacman"
-        # Memory for limited observation mode
         self.last_known_enemy_pos = None
-    
-    def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
+
+        self.steps_since_seen = 0
+        self.stale_threshold = 15
+
+        self.recent_positions = []
+
+        self.visited_cells = set()
+        self._rng = random.Random(1234)
+
+        self._search_start = 0.0
+
+    def step(self, map_state: np.ndarray,
+             my_position: tuple,
              enemy_position: tuple,
              step_number: int):
-        """
-        Decide the next move.
         
-        Args:
-            map_state: 2D numpy array where 1=wall, 0=empty, -1=unseen (fog)
-            my_position: Your current (row, col) in absolute coordinates
-            enemy_position: Ghost's (row, col) if visible, None otherwise
-            step_number: Current step number (starts at 1)
-            
-        Returns:
-            Move or (Move, steps): Direction to move (optionally with step count)
         """
-        # TODO: Implement your search algorithm here
-        
-        # Update memory if enemy is visible
+        Updates the memory of the Ghost's position. 
+        If the Ghost is unseen, it explores the map. If the Ghost is nearby, 
+        it triggers the Alpha-Beta pruning search to hunt it down.
+        """
+
+        # Update our memory when we actually see the enemy.
+        # If they hide in the fog, we remember their last location for up to the stale_threshold steps.
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
-        
-        # Use current sighting, fallback to last known, or explore
-        target = enemy_position or self.last_known_enemy_pos
-        
+            self.steps_since_seen = 0
+        else:
+            self.steps_since_seen += 1
+
+        target = enemy_position
         if target is None:
-            # No information about enemy - explore randomly
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self.last_known_enemy_pos is not None and self.steps_since_seen <= self.stale_threshold:
+                target = self.last_known_enemy_pos  # Hunt the ghost's last known location
+            else:
+                self.last_known_enemy_pos = None    # Ghost is completely lost
+
+        self._update_visited(my_position, map_state)
+
+        # If we have absolutely no idea where the enemy is, do not run Minimax.
+        # Instead, head towards the nearest unvisited fog cell to expand our vision.
+        if target is None:
+            frontier_move = helper.nearest_unvisited_move(my_position, map_state, self.visited_cells)
+            if frontier_move is not None and self._is_valid_move(my_position, frontier_move, map_state):
+                return (frontier_move, 1)
+
+            # If no unvisited cells are found, pick a random valid move.           
+            moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+            self._rng.shuffle(moves)
+            self.recent_positions.append(my_position)
+            self.recent_positions = self.recent_positions[-4:]
+            for move in moves:
+                if self._is_valid_move(my_position, move, map_state):
+                    next_pos = helper.get_result(my_position, (move, 1))
+                    if next_pos not in self.recent_positions:
+                        return (move, 1)
+            for move in moves:
                 if self._is_valid_move(my_position, move, map_state):
                     return (move, 1)
             return (Move.STAY, 1)
-        
-        # Example: Simple greedy approach (replace with your algorithm)
-        row_diff = target[0] - my_position[0]
-        col_diff = target[1] - my_position[1]
-        
-        # Try to move towards ghost
-        if abs(row_diff) > abs(col_diff):
-            primary_move = Move.DOWN if row_diff > 0 else Move.UP
-            desired_steps = abs(row_diff)
-        else:
-            primary_move = Move.RIGHT if col_diff > 0 else Move.LEFT
-            desired_steps = abs(col_diff)
 
-        action = self._choose_action(
-            my_position,
-            [primary_move],
-            map_state,
-            desired_steps
-        )
-        if action:
-            return action
+        self._search_start = time.perf_counter()
 
-        # If the primary direction is blocked, try other moves
-        fallback_moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
-        action = self._choose_action(my_position, fallback_moves, map_state, self.pacman_speed)
-        if action:
-            return action
+        # Initialize necessary variables
+        v = -float('inf')      # Keep track of the max score
+        move = None            # The action which is bounded to the max score
+        alpha = -float('inf')  # Keep track of the maximum node of a level
+        beta = float('inf')    # Keep track of the minimum node of a level
+
+        # Evaluate the most promising moves first
+        actions = self._seek_actions(my_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: helper._manhattan(helper.get_result(my_position, a), target))
+
+        for action in ordered_actions:
+            next_pos = helper.get_result(my_position, action)
+            score = self.min_value(next_pos, target, step_number + 1, map_state, 1, alpha, beta)
+            if score > v:
+                v = score
+                move = action
+            if self._time_up(): 
+                break
+        return move if move is not None else (Move.STAY, 1)
+
+    # Helper methods
+
+    def _update_visited(self, my_position, map_state):
+        """
+        Records the agent's current position and any known safe paths within 
+        its line of sight to prevent redundant exploration.
+        """
+        self.visited_cells.add(my_position)
+        rows, cols = np.where(map_state == 0)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            self.visited_cells.add((r, c))
+
+    def _seek_actions(self, pos, map_state: np.ndarray):
+        """
+        Generates all possible valid moves for Pacman, considering its speed and the map's layout.
+        Returns a list of (Move, steps) tuples.
+        """
+        actions = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            max_steps = self._max_valid_steps(pos, move, map_state, self.pacman_speed)
+
+            for steps in range(1, max_steps + 1):
+                actions.append((move, steps))
+
+        return actions 
+
+    def _hide_action(self, my_position, map_state: np.ndarray):
+        """
+        Generates 1-step moves. Used by Pacman to simulate and predict 
+        what the Ghost might do during the Minimax lookahead.
+        """
+        ghost_action = [(Move.STAY, 0)]
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(my_position, move, map_state):
+                ghost_action.append((move, 1)) 
+        return ghost_action
+
+    def max_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
+        """
+        Represents Pacman's turn, trying to choose the move that 
+        maximizes the utility score.
+        """
+        if helper.is_terminal(my_position, enemy_position, steps):
+            return helper.get_utility(my_position, enemy_position, steps, depth)
+
+        # STOPPING CONDITIONS:
+        # Reached max depth limit.
+        # Reached the strict 0.7s time limit.
+        # FOG OF WAR: The simulated move steps into an unknown cell (-1).
+        if depth > self.max_depth or self._time_up() or map_state[my_position[0], my_position[1]] == -1:
+            return helper._evaluation_heuristic(my_position, enemy_position, map_state)
+
+        v = -float('inf') # Keeps track of the highest score
+        actions = self._seek_actions(my_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: helper._manhattan(helper.get_result(my_position, a), enemy_position))
+
+        for action in ordered_actions:
+            next_pos = helper.get_result(my_position, action)
+            v = max(v, self.min_value(next_pos, enemy_position, steps + 1, map_state, depth + 1, alpha, beta))
+
+            if v >= beta: return v
+            alpha = max(alpha, v)
+            
+            if self._time_up(): return v
+            
+        return v
+
+    def min_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
+        """
+        Represents the Ghost's turn, simulating the Ghost picking the move that 
+        minimizes Pacman's score.
+        """
+        v = float('inf')
         
-        return (Move.STAY, 1)
-    
-    # Helper methods (you can add more)
-    
-    def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
-        for move in moves:
-            max_steps = min(self.pacman_speed, max(1, desired_steps))
-            steps = self._max_valid_steps(pos, move, map_state, max_steps)
-            if steps > 0:
-                return (move, steps)
-        return None
+        actions = self._hide_action(enemy_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: -helper._manhattan(my_position, helper.get_result(enemy_position, a)))
+
+        for action in ordered_actions:
+            next_enemy_pos = helper.get_result(enemy_position, action)
+
+            if helper.is_terminal(my_position, next_enemy_pos, steps + 1):
+                score = helper.get_utility(my_position, next_enemy_pos, steps + 1, depth)
+            elif depth > self.max_depth or self._time_up() or map_state[next_enemy_pos[0], next_enemy_pos[1]] == -1:
+                score = helper._evaluation_heuristic(my_position, next_enemy_pos, map_state)
+            else:
+                score = self.max_value(my_position, next_enemy_pos, steps + 1, map_state, depth + 1, alpha, beta)
+
+            v = min(v, score)
+            if v <= alpha: return v
+            beta = min(beta, v)
+            
+            if self._time_up(): return v
+            
+        return v
+
+    """
+    --------------------------------- ///// -------------------------------------
+    """
+
+    # def _choose_action(self, pos: tuple, moves, map_state: np.ndarray, desired_steps: int):
+    #     for move in moves:
+    #         max_steps = min(self.pacman_speed, max(1, desired_steps))
+    #         steps = self._max_valid_steps(pos, move, map_state, max_steps)
+    #         if steps > 0:
+    #             return (move, steps)
+    #     return None
 
     def _max_valid_steps(self, pos: tuple, move: Move, map_state: np.ndarray, max_steps: int) -> int:
+        """
+        Returns the maximum number of valid steps Pacman can take in the given direction,
+        safely stops accumulating steps if it steps into the fog (-1).
+        """
         steps = 0
         current = pos
         for _ in range(max_steps):
             delta_row, delta_col = move.value
             next_pos = (current[0] + delta_row, current[1] + delta_col)
-            if not self._is_valid_position(next_pos, map_state):
+            
+            # Stop if we hit an explicitly known wall or go out of bounds
+            if not helper.is_valid_position(next_pos, map_state):
                 break
+                
             steps += 1
             current = next_pos
+            
+            if map_state[current[0], current[1]] == -1:
+                break
+                
         return steps
-    
+
     def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
         """Check if a move from pos is valid for at least one step."""
         return self._max_valid_steps(pos, move, map_state, 1) == 1
     
-    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
-        row, col = pos
-        height, width = map_state.shape
-        
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        
-        return map_state[row, col] == 0
+    def _time_up(self):
+        """Checks if the internal search has exceeded the strict time budget."""
+        return (time.perf_counter() - self._search_start) > TIME_BUDGET
+
 
 
 class GhostAgent(BaseGhostAgent):
     """
-    Ghost (Hider) Agent - Goal: Avoid being caught
-    
-    Implement your search algorithm to evade Pacman as long as possible.
-    Suggested algorithms: BFS (find furthest point), Minimax, Monte Carlo
+    Ghost (Hider) Agent - Goal: Avoid being caught by minimizing Pacman's performance metrics.
     """
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # TODO: Initialize any data structures you need
-        # Memory for limited observation mode
+        self.max_depth = 4
+        self.pacman_speed = max(1, int(kwargs.get("pacman_speed", 1)))
+        self.name = "Simultaneous_Minimax_Ghost"
         self.last_known_enemy_pos = None
-    
-    def step(self, map_state: np.ndarray, 
-             my_position: tuple, 
+
+        self.steps_since_seen = 0
+        self.stale_threshold = 15
+
+        self.recent_positions = []
+        self.visited_cells = set()
+        self._rng = random.Random(5678)
+
+        self._search_start = 0.0
+
+    def step(self, map_state: np.ndarray,
+             my_position: tuple,
              enemy_position: tuple,
              step_number: int) -> Move:
-        """
-        Decide the next move.
         
-        Args:
-            map_state: 2D numpy array where 1=wall, 0=empty, -1=unseen (fog)
-            my_position: Your current (row, col) in absolute coordinates
-            enemy_position: Pacman's (row, col) if visible, None otherwise
-            step_number: Current step number (starts at 1)
-            
-        Returns:
-            Move: One of Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY
         """
-        # TODO: Implement your search algorithm here
-        
-        # Update memory if enemy is visible
+        Explores if safe, but if Pacman 
+        is detected, runs Alpha-Beta pruning to find the best escape route.
+        """
+
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
-        
-        # Use current sighting, fallback to last known, or move randomly
-        threat = enemy_position or self.last_known_enemy_pos
-        
-        if threat is None:
-            # No information about enemy - move randomly
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            self.steps_since_seen = 0
+        else:
+            self.steps_since_seen += 1
+
+        target = enemy_position
+        if target is None:
+            if self.last_known_enemy_pos is not None and self.steps_since_seen <= self.stale_threshold:
+                target = self.last_known_enemy_pos
+            else:
+                self.last_known_enemy_pos = None
+
+        self._update_visited(my_position, map_state)
+
+        if target is None:
+            frontier_move = helper.nearest_unvisited_move(my_position, map_state, self.visited_cells)
+            if frontier_move is not None and self._is_valid_move(my_position, frontier_move, map_state):
+                return frontier_move
+
+            moves = [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]
+            self._rng.shuffle(moves)
+            self.recent_positions.append(my_position)
+            self.recent_positions = self.recent_positions[-4:]
+            for move in moves:
+                if self._is_valid_move(my_position, move, map_state):
+                    next_pos = helper.get_result(my_position, (move, 1))
+                    if next_pos not in self.recent_positions:
+                        return move
+            for move in moves:
                 if self._is_valid_move(my_position, move, map_state):
                     return move
             return Move.STAY
-        
-        # Example: Simple evasive approach (replace with your algorithm)
-        row_diff = my_position[0] - threat[0]
-        col_diff = my_position[1] - threat[1]
-        
-        # Try to move away from Pacman
-        if abs(row_diff) > abs(col_diff):
-            move = Move.DOWN if row_diff > 0 else Move.UP
-        else:
-            move = Move.RIGHT if col_diff > 0 else Move.LEFT
-        
-        # Check if move is valid
-        if self._is_valid_move(my_position, move, map_state):
-            return move
-        
-        # If not valid, try other moves
+
+        self._search_start = time.perf_counter()
+
+        stay_score = None
+        best_move_score = float('inf')
+        best_move = None
+        alpha = -float('inf')
+        beta = float('inf')
+
+        actions = self._hide_action(my_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: -helper._manhattan(helper.get_result(my_position, a), target))
+
+        for action in ordered_actions:
+            next_hide_pos = helper.get_result(my_position, action)
+            score = self.max_value(next_hide_pos, target, step_number + 1, map_state, 1, alpha, beta)
+            
+            if action[0] == Move.STAY:
+                stay_score = score
+                continue
+            
+            if score < best_move_score:
+                best_move_score = score
+                best_move = action[0]
+
+            if self._time_up():
+                break
+
+        if best_move is None:
+            return Move.STAY
+
+        STAY_MARGIN = 1.5
+        if stay_score is not None and stay_score < best_move_score - STAY_MARGIN:
+            return Move.STAY
+        return best_move
+
+    def _update_visited(self, my_position, map_state):
+        # same as PacmanAgent's _update_visited
+        self.visited_cells.add(my_position)
+        rows, cols = np.where(map_state == 0)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            self.visited_cells.add((r, c))
+
+    def _hide_action(self, my_position, map_state: np.ndarray):
+        # same as PacmanAgent's _hide_action
+        actions = [(Move.STAY, 1)]
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             if self._is_valid_move(my_position, move, map_state):
-                return move
+                actions.append((move, 1)) 
+        return actions
+
+    def _seek_actions(self, pos, map_state):
+        # same as PacmanAgent's _seek_actions
+        actions = []
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            current = pos
+            for steps in range(1, self.pacman_speed + 1):
+                delta_row, delta_col = move.value
+                next_pos = (current[0] + delta_row, current[1] + delta_col)
+                if not helper.is_valid_position(next_pos, map_state):
+                    break
+                actions.append((move, steps))
+                current = next_pos
+        return actions
+
+    def max_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
+        """
+        Assumes Pacman will play optimally to maximize its score. 
+        """
+        if helper.is_terminal(my_position, enemy_position, steps):
+            return helper.get_utility(my_position, enemy_position, steps, depth)
+
+        if depth > self.max_depth or self._time_up() or map_state[enemy_position[0], enemy_position[1]] == -1:
+            return helper._evaluation_heuristic(my_position, enemy_position, map_state)
+
+        v = -float('inf')
         
-        return Move.STAY
-    
-    # Helper methods (you can add more)
-    
+        actions = self._seek_actions(enemy_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: helper._manhattan(my_position, helper.get_result(enemy_position, a)))
+
+        for action in ordered_actions:
+            next_enemy_pos = helper.get_result(enemy_position, action)
+            v = max(v, self.min_value(my_position, next_enemy_pos, steps + 1, map_state, depth + 1, alpha, beta))
+
+            if v >= beta: return v
+            alpha = max(alpha, v)
+
+            if self._time_up(): return v
+
+        return v
+
+    def min_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
+        """
+        The Ghost tries to pick actions that minimize the evaluation score.
+        """
+        v = float('inf')
+
+        # Evaluate the most promising moves first
+        actions = self._hide_action(my_position, map_state)
+        ordered_actions = sorted(actions, key=lambda a: -helper._manhattan(helper.get_result(my_position, a), enemy_position))
+
+        for action in ordered_actions:
+            next_hide_pos = helper.get_result(my_position, action)
+
+            if helper.is_terminal(next_hide_pos, enemy_position, steps + 1):
+                score = helper.get_utility(next_hide_pos, enemy_position, steps + 1, depth)
+            elif depth > self.max_depth or self._time_up() or map_state[next_hide_pos[0], next_hide_pos[1]] == -1:
+                score = helper._evaluation_heuristic(next_hide_pos, enemy_position, map_state)
+            else:
+                score = self.max_value(next_hide_pos, enemy_position, steps + 1, map_state, depth + 1, alpha, beta)
+
+            v = min(v, score) 
+
+            if v <= alpha: return v
+            beta = min(beta, v)
+
+            if self._time_up(): return v
+
+        return v
+
     def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
-        """Check if a move from pos is valid."""
+        # same as PacmanAgent's _is_valid_move
         delta_row, delta_col = move.value
         new_pos = (pos[0] + delta_row, pos[1] + delta_col)
-        return self._is_valid_position(new_pos, map_state)
+        return helper.is_valid_position(new_pos, map_state)
     
-    def _is_valid_position(self, pos: tuple, map_state: np.ndarray) -> bool:
-        """Check if a position is valid (not a wall and within bounds)."""
-        row, col = pos
-        height, width = map_state.shape
-        
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return False
-        
-        return map_state[row, col] == 0
+    def _time_up(self):
+        # same as PacmanAgent's _time_up
+        return (time.perf_counter() - self._search_start) > TIME_BUDGET
