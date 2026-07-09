@@ -40,7 +40,7 @@ class GameVisualizer:
             ghost_move: Last move made by Ghost
             result: Game result if finished
         """
-        self.clear_screen()
+        #self.clear_screen()
         
         # Header
         print(f"\n{'='*60}")
