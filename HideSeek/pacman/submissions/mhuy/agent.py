@@ -86,14 +86,14 @@ class PacmanAgent(BasePacmanAgent):
         self.position_history.append(my_position)
 
         # 3. BULLETPROOF VISION & DISTANCE CHECK
-        is_ghost_visible = (
-                enemy_position is not None
-                and len(enemy_position) >= 2
-                and enemy_position != (-1, -1)
-                and enemy_position != ()
-        )
+        # is_ghost_visible = (
+        #         enemy_position is not None
+        #         and len(enemy_position) >= 2
+        #         and enemy_position != (-1, -1)
+        #         and enemy_position != ()
+        # )
 
-        if is_ghost_visible:
+        if enemy_position:
             # Calculate the raw distance to the ghost
             dist = abs(my_position[0] - enemy_position[0]) + abs(my_position[1] - enemy_position[1])
 
@@ -105,8 +105,6 @@ class PacmanAgent(BasePacmanAgent):
                 self.last_move = action[0]
                 return action
             else:
-                # FAR CHASE (Framework Leak): Ghost is far away, we need BFS to route around walls.
-                # Temporarily manipulate the belief state so _blind_search targets the ghost perfectly.
                 self.belief_state.fill(0.0)
                 self.belief_state[enemy_position[0], enemy_position[1]] = 1.0
                 self.current_target = enemy_position
@@ -148,7 +146,7 @@ class PacmanAgent(BasePacmanAgent):
                     passable_neighbors = []
                     for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
                         nr, nc = r + m.value[0], c + m.value[1]
-                        if 0 <= nr < 21 and 0 <= nc < 21 and self.global_map[nr, nc] != 1:
+                        if self.global_map[nr, nc] == 0:
                             passable_neighbors.append((nr, nc))
 
                     if passable_neighbors:
@@ -324,13 +322,16 @@ class PacmanAgent(BasePacmanAgent):
         ghost_options = []
         for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY]:
             gp = (ghost_pos[0] + m.value[0], ghost_pos[1] + m.value[1])
-            if 0 <= gp[0] < 21 and 0 <= gp[1] < 21 and self.global_map[gp] != 1:
+            if 0 <= gp[0] < 21 and 0 <= gp[1] < 21 and self.global_map[gp] == 0:
                 ghost_options.append(gp)
         return ghost_options
 
     def _is_confirmed_safe(self, pos):
-        """Optimistically assumes unseen tiles (-1) are safe until a wall (1) is proven."""
-        return 0 <= pos[0] < 21 and 0 <= pos[1] < 21 and self.global_map[pos] != 1
+        return (
+            0 <= pos[0] < 21
+            and 0 <= pos[1] < 21
+            and self.global_map[pos] == 0
+        )
 
 
 class GhostAgent(BaseGhostAgent):

@@ -56,8 +56,8 @@ class Arena:
                  deterministic_starts: bool = True,
                  capture_distance_threshold: int = 1,
                  pacman_speed: int = 1,
-                 pacman_obs_radius: int = 0,
-                 ghost_obs_radius: int = 0):
+                 pacman_obs_radius: int = 5,
+                 ghost_obs_radius: int = 5):
         """
         Initialize the arena.
         
