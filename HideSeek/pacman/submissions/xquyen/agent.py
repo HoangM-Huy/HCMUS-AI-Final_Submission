@@ -20,6 +20,7 @@ IMPORTANT:
 - map_state cells: 1=wall, 0=empty, -1=unseen (fog)
 """
 
+import collections
 import sys
 from pathlib import Path
 import time
@@ -84,32 +85,42 @@ class PacmanAgent(BasePacmanAgent):
              my_position: tuple, 
              enemy_position: tuple,
              step_number: int):
-        
-        self.start_time = time.time()
-        
+
+        if not hasattr(self, 'known_map') or self.known_map is None:
+            self.known_map = np.copy(map_state)
+
+        else:
+            visible_cells = (map_state != -1)
+            self.known_map[visible_cells] = map_state[visible_cells]
+
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
-            
+        
+        self.start_time = time.time()
         target = self.last_known_enemy_pos
         
-        if target is None:
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                if self._is_valid_move(my_position, move, map_state):
-                    return (move, 1)
-            return (Move.STAY, 1)
+        if target is None or my_position == target:
+            target = self._find_nearest_unexplored(my_position)
+
+            if target is None:
+                return (Move.STAY, 1)
+
+            return self._bfs_move_towards(my_position, target, is_pacman=True)
+
+        self.dist_map = self._precompute_distances(target, self.known_map)
 
         best_val = -float('inf')
         best_action = None
         alpha = -float('inf')
         beta = float('inf')
 
-        actions = self._seek_actions(my_position, map_state)
-        # Move Ordering: ưu tiên các nước đi đưa Pacman lại gần Ghost nhất
-        actions.sort(key=lambda a: bfs_maze_distance(self._result(my_position, a), target, map_state))
+        actions = self._seek_actions(my_position, self.known_map)
+        actions.sort(key=lambda a: self.dist_map[self._result(my_position, a)[0], self._result(my_position, a)[1]])
 
         for action in actions:
             next_pos = self._result(my_position, action)
-            val = self.min_value(next_pos, target, step_number + 1, map_state, depth=1, alpha=alpha, beta=beta)
+            # Kích hoạt não Minimax
+            val = self.min_value(next_pos, target, step_number + 1, depth=1, alpha=alpha, beta=beta)
             
             if val > best_val:
                 best_val = val
@@ -117,43 +128,41 @@ class PacmanAgent(BasePacmanAgent):
             
             alpha = max(alpha, best_val)
             
+            # Cắt tỉa nếu sắp hết thời gian (dưới 0.9s)
             if time.time() - self.start_time > self.TIME_LIMIT:
                 break
-        """
-        TG = time.time() - self.start_time
-        print(f"Step {step_number} - Pacman thinks: {TG:.4f} s")
-        """
+
         return best_action if best_action else (Move.STAY, 1)
     
     # --- Các hàm Minimax của Pacman ---
 
-    def max_value(self, pacman_pos, ghost_pos, steps, map_state, depth, alpha, beta):
+    def max_value(self, pacman_pos, ghost_pos, steps, depth, alpha, beta):
         if self._terminal(pacman_pos, ghost_pos, steps):
             return self._utility(pacman_pos, ghost_pos, steps, depth)
 
         if depth >= self.max_depth or (time.time() - self.start_time > self.TIME_LIMIT):
-            return -manhattan_distance(pacman_pos, ghost_pos)
+            return -self.dist_map[pacman_pos[0], pacman_pos[1]]
 
         v = -float('inf')
-        for action in self._seek_actions(pacman_pos, map_state):
+        for action in self._seek_actions(pacman_pos, self.known_map):
             next_pac = self._result(pacman_pos, action)
-            v = max(v, self.min_value(next_pac, ghost_pos, steps + 1, map_state, depth + 1, alpha, beta))
+            v = max(v, self.min_value(next_pac, ghost_pos, steps + 1, depth + 1, alpha, beta))
             if v >= beta:
                 return v
             alpha = max(alpha, v)
         return v
 
-    def min_value(self, pacman_pos, ghost_pos, steps, map_state, depth, alpha, beta):
+    def min_value(self, pacman_pos, ghost_pos, steps, depth, alpha, beta):
         if self._terminal(pacman_pos, ghost_pos, steps):
             return self._utility(pacman_pos, ghost_pos, steps, depth)
 
         if depth >= self.max_depth or (time.time() - self.start_time > self.TIME_LIMIT):
-            return -manhattan_distance(pacman_pos, ghost_pos)
+            return -self.dist_map[pacman_pos[0], pacman_pos[1]]
 
         v = float('inf')
-        for action in self._hide_action(ghost_pos, map_state):
+        for action in self._hide_action(ghost_pos, self.known_map):
             next_ghost = self._result(ghost_pos, action)
-            v = min(v, self.max_value(pacman_pos, next_ghost, steps + 1, map_state, depth + 1, alpha, beta))
+            v = min(v, self.max_value(pacman_pos, next_ghost, steps + 1, depth + 1, alpha, beta))
             if v <= alpha:
                 return v
             beta = min(beta, v)
@@ -225,7 +234,102 @@ class PacmanAgent(BasePacmanAgent):
         
         return map_state[row, col] == 0
 
+    def _find_nearest_unexplored(self, start):
+        """
+        Dùng BFS loang ra để tìm ô '0' (an toàn) gần nhất 
+        mà nằm sát vách với một ô '-1' (sương mù).
+        """
+        rows, cols = self.known_map.shape
+        queue = collections.deque([start])
+        visited = set([start])
+        
+        while queue:
+            r, c = queue.popleft()
+            
+            # Kiểm tra 4 hướng xung quanh ô hiện tại
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    # Nếu thấy sương mù (-1) sát bên, thì ô hiện tại (r, c) là mép rìa an toàn
+                    if self.known_map[nr, nc] == -1:
+                        return (r, c) 
+            
+            # Nếu chưa thấy sương mù, tiếp tục loang ra các ô an toàn (0)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if self.known_map[nr, nc] == 0 and (nr, nc) not in visited:
+                        visited.add((nr, nc))
+                        queue.append((nr, nc))
+        return None # Đã khám phá hết map
 
+    def _bfs_move_towards(self, start, target, is_pacman=True):
+        """
+        Đi từng bước một hướng về target dựa trên mảng khoảng cách BFS.
+        """
+        if start == target or target is None:
+            return (Move.STAY, 1) if is_pacman else Move.STAY
+            
+        # Gọi lại hàm precompute thần thánh để đo khoảng cách từ target tới mọi nơi
+        dist_map = self._precompute_distances(target, self.known_map)
+        
+        best_move = Move.STAY
+        best_dist = float('inf')
+        
+        # Thử 4 hướng đi từ vị trí hiện tại
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(start, move, self.known_map):
+                delta_row, delta_col = move.value
+                nr, nc = start[0] + delta_row, start[1] + delta_col
+                
+                # Chọn bước đi làm khoảng cách tới target giảm nhiều nhất
+                if dist_map[nr, nc] < best_dist:
+                    best_dist = dist_map[nr, nc]
+                    best_move = move
+                    
+        return (best_move, 1) if is_pacman else best_move
+
+    def _bfs_run_away(self, start, threat):
+        """
+        (Dành riêng cho Ghost) Tìm bước đi hợp lệ để tránh xa threat nhất có thể.
+        """
+        if threat is None:
+            return Move.STAY
+            
+        dist_map = self._precompute_distances(threat, self.known_map)
+        
+        best_move = Move.STAY
+        best_dist = -1
+        
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(start, move, self.known_map):
+                delta_row, delta_col = move.value
+                nr, nc = start[0] + delta_row, start[1] + delta_col
+                
+                # Chọn bước đi làm khoảng cách tới threat TĂNG lên cao nhất
+                if dist_map[nr, nc] > best_dist and dist_map[nr, nc] != 100:
+                    best_dist = dist_map[nr, nc]
+                    best_move = move
+                    
+        return best_move
+
+    def _precompute_distances(self, goal, map_state):
+        rows, cols = map_state.shape
+        # Khởi tạo mảng khoảng cách với giá trị lớn (1000)
+        distances = np.full((rows, cols), 1000)
+        queue = collections.deque([(goal, 0)])
+        distances[goal] = 0
+
+        while queue:
+            (r, c), dist = queue.popleft()
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and map_state[nr, nc] == 0:
+                    if distances[nr, nc] == 1000:
+                        distances[nr, nc] = dist + 1
+                        queue.append(((nr, nc), dist + 1))
+        return distances
+    
 class GhostAgent(BaseGhostAgent):
     """
     Ghost (Hider) Agent - Goal: Avoid being caught
@@ -259,18 +363,28 @@ class GhostAgent(BaseGhostAgent):
         Returns:
             Move: One of Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY
         """
-        self.start_time = time.time()
+        if not hasattr(self, 'known_map') or self.known_map is None:
+            self.known_map = np.copy(map_state)
+        else:
+            visible_cells = (map_state != -1)
+            self.known_map[visible_cells] = map_state[visible_cells]
         
         if enemy_position is not None:
             self.last_known_enemy_pos = enemy_position
-            
+
+        self.start_time = time.time()  
         threat = self.last_known_enemy_pos
         
         if threat is None:
-            for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
-                if self._is_valid_move(my_position, move, map_state):
-                    return move
-            return Move.STAY
+            if self.last_known_enemy_pos is not None:
+                return self._bfs_run_away(my_position, self.last_known_enemy_pos)
+            else:
+                target = self._find_nearest_unexplored(my_position)
+                if target:
+                    return self._bfs_move_towards(my_position, target, is_pacman=False)
+                return Move.STAY
+
+        self.dist_map = self._precompute_distances(threat, self.known_map)
 
         # MIN player at first 
         best_val = float('inf')
@@ -278,13 +392,13 @@ class GhostAgent(BaseGhostAgent):
         alpha = -float('inf')
         beta = float('inf')
 
-        actions = self._hide_action(my_position, map_state)
+        actions = self._hide_action(my_position, self.known_map)
         # Move Ordering: ưu tiên các ô cách xa Pacman nhất
-        actions.sort(key=lambda a: bfs_maze_distance(self._result(my_position, a), threat, map_state), reverse=True)
+        actions.sort(key=lambda a: self.dist_map[self._result(my_position, a)[0], self._result(my_position, a)[1]], reverse=True)
 
         for action in actions:
             next_hide_pos = self._result(my_position, action)
-            val = self.max_value(next_hide_pos, threat, step_number + 1, map_state, depth=1, alpha=alpha, beta=beta)
+            val = self.max_value(next_hide_pos, threat, step_number + 1, depth=1, alpha=alpha, beta=beta)
             
             if val < best_val:
                 best_val = val
@@ -302,33 +416,33 @@ class GhostAgent(BaseGhostAgent):
             
     # --- Các hàm Minimax của Ghost ---
 
-    def max_value(self, ghost_pos, pacman_pos, steps, map_state, depth, alpha, beta):
+    def max_value(self, ghost_pos, pacman_pos, steps, depth, alpha, beta):
         if self._terminal(pacman_pos, ghost_pos, steps):
             return self._utility(pacman_pos, ghost_pos, steps, depth)
 
         if depth >= self.max_depth or (time.time() - self.start_time > self.TIME_LIMIT):
-            return -manhattan_distance(pacman_pos, ghost_pos)
+            return -self.dist_map[ghost_pos[0], ghost_pos[1]]
 
         v = -float('inf')
-        for action in self._seek_actions(pacman_pos, map_state):
+        for action in self._seek_actions(pacman_pos, self.known_map):
             next_pac = self._result(pacman_pos, action)
-            v = max(v, self.min_value(ghost_pos, next_pac, steps + 1, map_state, depth + 1, alpha, beta))
+            v = max(v, self.min_value(ghost_pos, next_pac, steps + 1, depth + 1, alpha, beta))
             if v >= beta:
                 return v
             alpha = max(alpha, v)
         return v
 
-    def min_value(self, ghost_pos, pacman_pos, steps, map_state, depth, alpha, beta):
+    def min_value(self, ghost_pos, pacman_pos, steps, depth, alpha, beta):
         if self._terminal(pacman_pos, ghost_pos, steps):
             return self._utility(pacman_pos, ghost_pos, steps, depth)
 
         if depth >= self.max_depth or (time.time() - self.start_time > self.TIME_LIMIT):
-            return -manhattan_distance(pacman_pos, ghost_pos)
+            return -self.dist_map[ghost_pos[0], ghost_pos[1]]
 
         v = float('inf')
-        for action in self._hide_action(ghost_pos, map_state):
+        for action in self._hide_action(ghost_pos, self.known_map):
             next_ghost = self._result(ghost_pos, action)
-            v = min(v, self.max_value(next_ghost, pacman_pos, steps + 1, map_state, depth + 1, alpha, beta))
+            v = min(v, self.max_value(next_ghost, pacman_pos, steps + 1, depth + 1, alpha, beta))
             if v <= alpha:
                 return v
             beta = min(beta, v)
@@ -391,3 +505,98 @@ class GhostAgent(BaseGhostAgent):
             return False
         
         return map_state[row, col] == 0
+    def _find_nearest_unexplored(self, start):
+        """
+        Dùng BFS loang ra để tìm ô '0' (an toàn) gần nhất 
+        mà nằm sát vách với một ô '-1' (sương mù).
+        """
+        rows, cols = self.known_map.shape
+        queue = collections.deque([start])
+        visited = set([start])
+        
+        while queue:
+            r, c = queue.popleft()
+            
+            # Kiểm tra 4 hướng xung quanh ô hiện tại
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    # Nếu thấy sương mù (-1) sát bên, thì ô hiện tại (r, c) là mép rìa an toàn
+                    if self.known_map[nr, nc] == -1:
+                        return (r, c) 
+            
+            # Nếu chưa thấy sương mù, tiếp tục loang ra các ô an toàn (0)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if self.known_map[nr, nc] == 0 and (nr, nc) not in visited:
+                        visited.add((nr, nc))
+                        queue.append((nr, nc))
+        return None # Đã khám phá hết map
+
+    def _bfs_move_towards(self, start, target, is_pacman=True):
+        """
+        Đi từng bước một hướng về target dựa trên mảng khoảng cách BFS.
+        """
+        if start == target or target is None:
+            return (Move.STAY, 1) if is_pacman else Move.STAY
+            
+        # Gọi lại hàm precompute thần thánh để đo khoảng cách từ target tới mọi nơi
+        dist_map = self._precompute_distances(target, self.known_map)
+        
+        best_move = Move.STAY
+        best_dist = float('inf')
+        
+        # Thử 4 hướng đi từ vị trí hiện tại
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(start, move, self.known_map):
+                delta_row, delta_col = move.value
+                nr, nc = start[0] + delta_row, start[1] + delta_col
+                
+                # Chọn bước đi làm khoảng cách tới target giảm nhiều nhất
+                if dist_map[nr, nc] < best_dist:
+                    best_dist = dist_map[nr, nc]
+                    best_move = move
+                    
+        return (best_move, 1) if is_pacman else best_move
+
+    def _bfs_run_away(self, start, threat):
+        """
+        (Dành riêng cho Ghost) Tìm bước đi hợp lệ để tránh xa threat nhất có thể.
+        """
+        if threat is None:
+            return Move.STAY
+            
+        dist_map = self._precompute_distances(threat, self.known_map)
+        
+        best_move = Move.STAY
+        best_dist = -1
+        
+        for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            if self._is_valid_move(start, move, self.known_map):
+                delta_row, delta_col = move.value
+                nr, nc = start[0] + delta_row, start[1] + delta_col
+                
+                # Chọn bước đi làm khoảng cách tới threat TĂNG lên cao nhất
+                if dist_map[nr, nc] > best_dist and dist_map[nr, nc] != 100:
+                    best_dist = dist_map[nr, nc]
+                    best_move = move
+                    
+        return best_move
+
+    def _precompute_distances(self, goal, map_state):
+        rows, cols = map_state.shape
+        # Khởi tạo mảng khoảng cách với giá trị lớn (1000)
+        distances = np.full((rows, cols), 1000)
+        queue = collections.deque([(goal, 0)])
+        distances[goal] = 0
+
+        while queue:
+            (r, c), dist = queue.popleft()
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and map_state[nr, nc] == 0:
+                    if distances[nr, nc] == 1000:
+                        distances[nr, nc] = dist + 1
+                        queue.append(((nr, nc), dist + 1))
+        return distances
