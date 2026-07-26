@@ -16,6 +16,7 @@ if '--sandbox' in sys.argv:
     sys.path.insert(0, str(Path(__file__).parent.parent / 'instructors'))
 from agent_loader import AgentLoader, AgentLoadError
 from visualizer import GameVisualizer
+import time
 
 
 class AgentTimeoutError(Exception):
@@ -174,6 +175,8 @@ class Arena:
         
         while not game_over:
             step += 1
+
+            pacman_start = time.perf_counter()
             
             # Get observations for each agent
             pacman_obs, pacman_my_pos, pacman_visible_enemy = self.env.get_observation(
@@ -212,6 +215,11 @@ class Arena:
                 result = 'ghost_wins'
                 game_over = True
                 break
+
+            pacman_elapsed = time.perf_counter() - pacman_start
+            print("Pacman runtime: ", pacman_elapsed)
+
+            ghost_start = time.perf_counter()
             
             try:
                 ghost_move = self._run_agent_step(
@@ -240,6 +248,9 @@ class Arena:
                 result = 'pacman_wins'
                 game_over = True
                 break
+
+            ghost_elapsed = time.perf_counter() - ghost_start
+            print("Ghost runtime: ", ghost_elapsed)
             
             # Record moves
             self.stats['pacman_moves'].append(pacman_action)

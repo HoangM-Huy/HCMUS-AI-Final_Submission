@@ -20,6 +20,7 @@ IMPORTANT:
 import sys
 from pathlib import Path
 from collections import deque
+import math
 
 # Add src to path to import the interface
 src_path = Path(__file__).parent.parent.parent / "src"
