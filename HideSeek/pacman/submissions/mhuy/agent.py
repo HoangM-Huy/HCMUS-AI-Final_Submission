@@ -86,14 +86,6 @@ class PacmanAgent(BasePacmanAgent):
         self._sync_belief_state(map_state, my_position)
         self.position_history.append(my_position)
 
-        # 3. BULLETPROOF VISION & DISTANCE CHECK
-        # is_ghost_visible = (
-        #         enemy_position is not None
-        #         and len(enemy_position) >= 2
-        #         and enemy_position != (-1, -1)
-        #         and enemy_position != ()
-        # )
-
         if enemy_position:
             # Calculate the raw distance to the ghost
             dist = abs(my_position[0] - enemy_position[0]) + abs(my_position[1] - enemy_position[1])
@@ -126,7 +118,7 @@ class PacmanAgent(BasePacmanAgent):
         """Clears vision strictly using the environment mask, normalizes, and diffuses."""
 
         # 1. Environment-Driven Vision Clearing[cite: 1]
-        visible_mask = map_state != -1
+        visible_mask = (map_state != -1) & (map_state == 0)
         self.belief_state[visible_mask] = 0.0
 
         # 2. Normalize BEFORE diffusion
@@ -344,15 +336,10 @@ class PacmanAgent(BasePacmanAgent):
 class GhostAgent(BaseGhostAgent):
     """
     Ghost (Hider) Agent - Goal: Avoid being caught
-    
-    Implement your search algorithm to evade Pacman as long as possible.
-    Suggested algorithms: BFS (find furthest point), Minimax, Monte Carlo
     """
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # TODO: Initialize any data structures you need
-        # Memory for limited observation mode
         self.last_known_enemy_pos = None
         self.max_depth = 4
         self.pacman_speed = 2
@@ -361,19 +348,6 @@ class GhostAgent(BaseGhostAgent):
              my_position: tuple, 
              enemy_position: tuple,
              step_number: int) -> Move:
-        """
-        Decide the next move.
-        
-        Args:
-            map_state: 2D numpy array where 1=wall, 0=empty, -1=unseen (fog)
-            my_position: Your current (row, col) in absolute coordinates
-            enemy_position: Pacman's (row, col) if visible, None otherwise
-            step_number: Current step number (starts at 1)
-            
-        Returns:
-            Move: One of Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY
-        """
-        # TODO: Implement your search algorithm here
         
         # Update memory if enemy is visible
         if enemy_position is not None:
@@ -381,20 +355,33 @@ class GhostAgent(BaseGhostAgent):
 
         threat = enemy_position or self.last_known_enemy_pos
 
-        # --- 1. OPENING BIAS: Prioritize UP and RIGHT for the first 15 steps ---
+        # 1. OPENING BIAS: Prioritize preferred moves for the first 15 steps
         if step_number <= 15 and enemy_position is None:
-            preferred_moves = [Move.UP, Move.RIGHT, Move.DOWN, Move.LEFT, Move.STAY]
+            preferred_moves = [Move.UP, Move.RIGHT, Move.DOWN, Move.LEFT]
             
-            # Find the first preferred move that is valid and safe
+            # Find a valid move that isn't a direct 180-degree reversal of the last move
             for move in preferred_moves:
                 delta_row, delta_col = move.value
                 next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
+                
+                # Check bounds and open space
                 if 0 <= next_pos[0] < 21 and 0 <= next_pos[1] < 21 and map_state[next_pos] == 0:
+                    # Prevent immediate back-and-forth stuttering
+                    if hasattr(self, '_last_opening_move') and move.value == (-self._last_opening_move[0], -self._last_opening_move[1]):
+                        continue
+                    
+                    self._last_opening_move = move.value
                     return move
+            
+            # Fallback if all preferred moves are blocked
+            return Move.STAY
 
-        # 2. CLEAR VISION: Pacman is visible, use Minimax / adversarial search
+        # 2. CLEAR VISION / EMERGENCY ESCAPE: Pacman is visible
         if enemy_position is not None:
-            v = float('inf')
+            print("Inbound")
+
+            # Standard Minimax search when safely distanced
+            v = -float('inf')
             best_move = Move.STAY
             alpha = -float('inf')
             beta = float('inf')
@@ -404,7 +391,7 @@ class GhostAgent(BaseGhostAgent):
                 next_hide_pos = self._result(my_position, action)
                 score = self.max_value(next_hide_pos, enemy_position, step_number + 1, map_state, 1, alpha, beta)
 
-                if score < v:
+                if score > v:  # Maximizing safety score
                     v = score
                     best_move = move_enum 
 
@@ -412,7 +399,7 @@ class GhostAgent(BaseGhostAgent):
 
         # 3. BLIND MODE / SAFE EXPLORATION: Pacman is hidden in fog
         else:
-            best_move = Move.STAY
+            best_move = None
             max_score = -float('inf')
 
             for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY]:
@@ -423,62 +410,68 @@ class GhostAgent(BaseGhostAgent):
                     score = 0
                     
                     if threat is not None:
-                        dist_to_threat = abs(next_pos[0] - threat[0]) + abs(next_pos[1] - threat[1])
+                        dist_map = self._get_bfs_distance_map(threat, map_state)
+                        dist_to_threat = dist_map.get(next_pos, abs(next_pos[0] - threat[0]) + abs(next_pos[1] - threat[1]))
                         score += dist_to_threat * 10
 
-                    open_neighbors = 0
-                    for m in [Move.UP, Move.DOWN, Move.RIGHT, Move.LEFT]:
-                        nr, nc = next_pos[0] + m.value[0], next_pos[1] + m.value[1]
-                        if 0 <= nr < 21 and 0 <= nc < 21 and map_state[nr, nc] == 0:
-                            open_neighbors += 1
-                    
+                    open_neighbors = len(self._get_valid_neighbors(next_pos, map_state))
                     score += open_neighbors * 5
 
                     if score > max_score:
                         max_score = score
                         best_move = move
 
-            return best_move
+            # Bulletproof return to guarantee a valid Move enum and prevent NoneType errors
+            return best_move if best_move is not None else Move.STAY
     
-    # Helper methods (you can add more)
-    # def _find_shadow_move(self, my_position, threat_pos, map_state):
-    #     best_move = Move.STAY
-    #     max_score = -float('inf')
+    # --- UPGRADED HELPER METHODS ---
 
-    #     for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT, Move.STAY]:
-    #         delta_row, delta_col = move.value
-    #         next_pos = (my_position[0] + delta_row, my_position[1] + delta_col)
+    def _get_bfs_distance_map(self, start_pos, map_state):
+        """Calculates true shortest-path walking distance across the maze."""
+        distances = {start_pos: 0}
+        queue = [start_pos]
+        
+        while queue:
+            curr = queue.pop(0)
+            dist = distances[curr]
+            
+            for nr, nc in self._get_valid_neighbors(curr, map_state):
+                if (nr, nc) not in distances:
+                    distances[(nr, nc)] = dist + 1
+                    queue.append((nr, nc))
+        return distances
 
-    #         # Check if valid map position and not a wall
-    #         if 0 <= next_pos[0] < 21 and 0 <= next_pos[1] < 21 and map_state[next_pos] == 0:
-    #             dist = abs(next_pos[0] - threat_pos[0]) + abs(next_pos[1] - threat_pos[1])
-                
-    #             # Check if this move puts a wall or corner between Ghost and Pacman
-    #             # (i.e., they are no longer aligned on a clear cross-hair ray)
-    #             is_shaded = False
-    #             if next_pos[0] != threat_pos[0] and next_pos[1] != threat_pos[1]:
-    #                 is_shaded = True # Diagonals or offset positions break the cardinal cross ray
-                
-    #             # Scoring: Prioritize distance, give a massive bonus for being "shaded" behind a corner
-    #             score = dist + (50 if is_shaded else 0)
+    def _get_valid_neighbors(self, pos, map_state):
+        r, c = pos
+        height, width = map_state.shape
+        valid = []
+        for m in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
+            nr, nc = r + m.value[0], c + m.value[1]
+            if 0 <= nr < height and 0 <= nc < width and map_state[nr, nc] != 1:
+                valid.append((nr, nc))
+        return valid
 
-    #             if score > max_score:
-    #                 max_score = score
-    #                 best_move = move
-
-    #     return best_move
-    
-    def _evaluation_heuristic(self, my_position, enemy_position, map_state):
-        # --- FIX 2: O(1) Lookup instead of O(BFS) calculation ---
-        # Return negative distance because we want to minimize distance to ghost (or maximize -dist)
-        return -self.dist_map[my_position[0], my_position[1]]
+    def _has_line_of_sight(self, p1, p2, map_state):
+        r1, c1 = p1
+        r2, c2 = p2
+        if r1 == r2:
+            step = 1 if c2 > c1 else -1
+            for c in range(c1 + step, c2, step):
+                if map_state[r1, c] == 1: return False
+            return True
+        if c1 == c2:
+            step = 1 if r2 > r1 else -1
+            for r in range(r1 + step, r2, step):
+                if map_state[r, c1] == 1: return False
+            return True
+        return False
 
     # Return a list of every possible moves for ghost
     def _hide_action(self, my_position, map_state: np.ndarray):
-        actions = [(Move.STAY, 0)]
+        actions = []
         for move in [Move.UP, Move.DOWN, Move.LEFT, Move.RIGHT]:
             if self._is_valid_move(my_position, move, map_state):
-                actions.append((move, 1)) # Ghost always moves with 1 step
+                actions.append((move, 1))
         return actions
 
     # Return a list of every possible moves for pacman
@@ -497,56 +490,45 @@ class GhostAgent(BaseGhostAgent):
 
     # Check if the game ends
     def _terminal(self, my_position, enemy_position, steps):
-        if helper._manhattan(my_position, enemy_position) < 2:
+        if my_position == enemy_position:  # Only terminal if caught on the exact same tile
             return True
         if steps > 200:
             return True
         return False
 
-    # The transition model, but this time my_position is the ghost.
     def _result(self, my_position, action):
         move, step = action
         delta_row, delta_col = move.value
         return (my_position[0] + delta_row * step, my_position[1] + delta_col * step)
 
-    # Gives out score (Same with pacman)
     def _utility(self, my_position, enemy_position, steps, depth):
-        if helper._manhattan(my_position, enemy_position) < 2:
-            return 1000 - depth
-        return -1000
+        if my_position == enemy_position:
+            return -10000 + depth  # Capture is worst possible outcome for ghost
+        
+        # Higher distance is better for the ghost
+        dist = abs(my_position[0] - enemy_position[0]) + abs(my_position[1] - enemy_position[1])
+        return dist * 100 - depth
 
-    # Same with pacman, but this time my_position is the ghost.
     def max_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
-
-        # If any transition model reaches the terminal state, gives out the scores
         if self._terminal(my_position, enemy_position, steps):
             return self._utility(my_position, enemy_position, steps, depth)
 
-        # If depth is reached before terminal, calculate heuristically instead
         if depth > self.max_depth:
             return helper._evaluation_heuristic(my_position, enemy_position, map_state)
 
         v = -float('inf')
         for action in self._seek_actions(enemy_position, map_state):
-            # Predicting pacman's move
             next_enemy_pos = self._result(enemy_position, action)
             v = max(v, self.min_value(my_position, next_enemy_pos, steps + 1, map_state, depth + 1, alpha, beta))
-
-            # If we know that this moves is higher than Beta
-            # Which means in the next loop, the opponent is already having a better move already.
-            # We prune the rest away (Stop the recursive loop).
-
             if v >= beta: return v
             alpha = max(alpha, v)
         return v
 
     def min_value(self, my_position, enemy_position, steps, map_state, depth, alpha, beta):
-        v = float('inf')
+        v = -float('inf')
         for action in self._hide_action(my_position, map_state):
+            move_enum, step_val = action
             next_hide_pos = self._result(my_position, action)
-
-            # Same with pacman agent's min_value, but this time my_position = ghost's position.
-            # We also prevent the guarding situation here, read pacman's agent comments for more details.
 
             if self._terminal(next_hide_pos, enemy_position, steps + 1):
                 score = self._utility(next_hide_pos, enemy_position, steps + 1, depth)
@@ -555,14 +537,14 @@ class GhostAgent(BaseGhostAgent):
             else:
                 score = self.max_value(next_hide_pos, enemy_position, steps + 1, map_state, depth + 1, alpha, beta)
 
-            v = min(v, score) # Pick best move.
+            # Heavy penalty for staying still to force the ghost to keep running
+            if move_enum == Move.STAY:
+                score -= 2000
 
-            # If we know that this moves is lower than Alpha
-            # Which means in the next loop, the opponent is already having a better move already.
-            # We prune the rest away (Stop the recursive loop).
-
-            if v <= alpha: return v
-            beta = min(beta, v)
+            v = max(v, score)
+            
+            if v >= beta: return v
+            alpha = max(alpha, v)
         return v
 
     def _is_valid_move(self, pos: tuple, move: Move, map_state: np.ndarray) -> bool:
