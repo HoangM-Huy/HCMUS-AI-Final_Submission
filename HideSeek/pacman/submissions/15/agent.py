@@ -117,7 +117,7 @@ class PacmanAgent(BasePacmanAgent):
     def _sync_belief_state(self, map_state, my_pos):
         """Clears vision strictly using the environment mask, normalizes, and diffuses."""
 
-        # 1. Environment-Driven Vision Clearing[cite: 1]
+        # 1. Environment-Driven Vision Clearing
         visible_mask = (map_state != -1) & (map_state == 0)
         self.belief_state[visible_mask] = 0.0
 
@@ -204,7 +204,7 @@ class PacmanAgent(BasePacmanAgent):
             best_target = None
             best_score = -1
 
-            # Unified Target Selection: Seamlessly blends Ghost-Hunting and Fog-Exploration
+            # Unidentified target: search + explore
             for r in range(21):
                 for c in range(21):
                     if (r, c) not in distances:
@@ -230,7 +230,7 @@ class PacmanAgent(BasePacmanAgent):
                     if prob > 0:
                         score = prob / (1.0 + dist * 0.5)
 
-                        # Strict Directional Inertia: Mathematically forbids 180-degree flip-flops
+                        # Strict Directional Inertia: Blocks dwadle back and forth
                         if self.last_move is not None:
                             dr, dc = r - my_position[0], c - my_position[1]
                             is_behind = False
@@ -276,7 +276,7 @@ class PacmanAgent(BasePacmanAgent):
                     return m, 1
             return Move.STAY, 1
 
-        # SAFE SPEED BURST: Only double-step if the landing zone is verified safe.
+        # Double the speed
         first_move = path[0]
         steps = 1
         if self.pacman_speed >= 2 and len(path) >= 2:
@@ -355,7 +355,7 @@ class GhostAgent(BaseGhostAgent):
 
         threat = enemy_position or self.last_known_enemy_pos
 
-        # 1. OPENING BIAS: Prioritize preferred moves for the first 15 steps
+        # 1. Prioritize preferred moves for the first 15 steps
         if step_number <= 15 and enemy_position is None:
             preferred_moves = [Move.UP, Move.RIGHT, Move.DOWN, Move.LEFT]
             
@@ -376,7 +376,7 @@ class GhostAgent(BaseGhostAgent):
             # Fallback if all preferred moves are blocked
             return Move.STAY
 
-        # 2. CLEAR VISION / EMERGENCY ESCAPE: Pacman is visible
+        # 2. Pacman is visible => Alpha-beta
         if enemy_position is not None:
             print("Inbound")
 
@@ -397,7 +397,7 @@ class GhostAgent(BaseGhostAgent):
 
             return best_move if best_move is not None else Move.STAY
 
-        # 3. BLIND MODE / SAFE EXPLORATION: Pacman is hidden in fog
+        # 3. Blind: Pacman is hidden in fog
         else:
             best_move = None
             max_score = -float('inf')
@@ -424,7 +424,7 @@ class GhostAgent(BaseGhostAgent):
             # Bulletproof return to guarantee a valid Move enum and prevent NoneType errors
             return best_move if best_move is not None else Move.STAY
     
-    # --- UPGRADED HELPER METHODS ---
+    # --- HELPER METHODS ---
 
     def _get_bfs_distance_map(self, start_pos, map_state):
         """Calculates true shortest-path walking distance across the maze."""
@@ -490,7 +490,7 @@ class GhostAgent(BaseGhostAgent):
 
     # Check if the game ends
     def _terminal(self, my_position, enemy_position, steps):
-        if my_position == enemy_position:  # Only terminal if caught on the exact same tile
+        if my_position == enemy_position: 
             return True
         if steps > 200:
             return True
