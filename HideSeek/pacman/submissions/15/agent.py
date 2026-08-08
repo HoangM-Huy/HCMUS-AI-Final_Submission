@@ -94,7 +94,6 @@ class PacmanAgent(BasePacmanAgent):
                 # CLOSE COMBAT: Use Matrix to intercept and prevent juking
                 self.current_target = None
                 action = self._matrix_search(my_position, enemy_position)
-                print("Matrix")
                 self.last_move = action[0]
                 return action
             else:
@@ -103,13 +102,11 @@ class PacmanAgent(BasePacmanAgent):
                 self.current_target = enemy_position
 
                 action = self._blind_search(my_position)
-                print("Blind")
                 self.last_move = action[0]
                 return action
         else:
             # GHOST HIDDEN: Standard exploration sweep
             action = self._blind_search(my_position)
-            print("Blind")
             self.last_move = action[0]
             return action
 
@@ -378,7 +375,6 @@ class GhostAgent(BaseGhostAgent):
 
         # 2. Pacman is visible => Alpha-beta
         if enemy_position is not None:
-            print("Inbound")
 
             # Standard Minimax search when safely distanced
             v = -float('inf')
